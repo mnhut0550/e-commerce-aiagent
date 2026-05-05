@@ -1,0 +1,99 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: postgres
+    restart: always
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-agentuser}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-agentpassword}
+      POSTGRES_DB: ${POSTGRES_DB:-agentdata}
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./postgre-init:/docker-entrypoint-initdb.d
+    networks:
+      - app_net
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER:-agentuser} -d $${POSTGRES_DB:-agentdata}"]
+      interval: 2s
+      timeout: 2s
+      retries: 10
+      start_period: 5s
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "${REDIS_PORT:-6379}:6379"  # chỉ expose ra ngoài, internal vẫn 6379
+    container_name: redis
+    restart: always
+    networks:
+      - app_net
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 2s
+      timeout: 2s
+      retries: 10
+
+  backend:
+    build: .
+    image: backend:latest
+    container_name: backend
+    working_dir: /app
+    command: uvicorn backend.main:app --host 0.0.0.0 --port 8000
+    ports:
+      - "10126:8000"
+    env_file:
+      - ./.env
+    environment:
+      - PYTHONPATH=/app
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks:
+      - app_net
+
+  celery_worker:
+    build: .
+    image: backend:latest
+    container_name: celery_worker
+    working_dir: /app
+    command: celery -A backend.celery_app.celery_app worker --loglevel=info --concurrency=4
+    env_file:
+      - ./.env
+    environment:
+      - PYTHONPATH=/app
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks:
+      - app_net
+    restart: always
+
+  flower:
+    image: backend:latest
+    container_name: flower
+    working_dir: /app
+    command: celery -A backend.celery_app.celery_app flower --port=5555
+    ports:
+      - "5555:5555"
+    env_file:
+      - ./.env
+    environment:
+      - PYTHONPATH=/app
+    depends_on:
+      - redis
+    networks:
+      - app_net
+    restart: always
+
+volumes:
+  postgres_data:
+
+networks:
+  app_net:
+    driver: bridge
